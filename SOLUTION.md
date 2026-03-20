@@ -1,58 +1,32 @@
-# Solution
 
-## Ce qu'on a fait
+Solution
+What we did
 
-### Nouveau fichier : `constantblackscholesprocess.hpp` / `.cpp`
+New file: constantblackscholesprocess.hpp / .cpp
+We created ConstantBlackScholesProcess, a subclass of StochasticProcess1D that stores r, q and sigma as scalars fixed at construction time. The drift() and diffusion() methods return these values directly, with no calls to the term structures.
 
-On a créé `ConstantBlackScholesProcess`, une sous-classe de `StochasticProcess1D` qui stocke
-`r`, `q` et `sigma` comme des scalaires fixés à la construction. Les méthodes `drift()` et
-`diffusion()` retournent directement ces valeurs, sans aucun appel aux term structures.
+To avoid duplicating the parameter extraction logic in every engine, we placed it in a free function makeConstantProcess(process, exerciseTime, strikeForVol):
+r and q are the continuous zero-rates at the exercise date
+sigma is the Black implied volatility at (exerciseTime, strikeForVol)
 
-Pour éviter de dupliquer l'extraction des paramètres dans chaque engine, on a mis la logique
-dans une fonction libre `makeConstantProcess(process, exerciseTime, strikeForVol)` :
-- `r` et `q` sont les zero-rates continus à la date d'exercice
-- `sigma` est la vol implicite de Black à `(exerciseTime, strikeForVol)`
+Modified engines
+We applied the same change to all three engines (mceuropeanengine.hpp, mc_discr_arith_av_strike.hpp, mclookbackengine.hpp):
+Added a bool useConstantParams_ member to each engine class
+Added withConstantParameters() to each Make class
 
-### Engines modifiés
+The process substitution happens only in pathGenerator() — the pathPricer() continues to use the original rate curve for discounting
+For the Asian average-strike, which has no fixed strike, we use the current spot (x0()) as an ATM reference for the volatility lookup.
+Results
+After compilation and execution (make test):
+                               old engine                  non constant                      constant
+           kind            NPV       time [s]            NPV       time [s]            NPV       time [s]
+     ----------------------------------------------------------------------------------------------------
+       European        4.17073        2.61828        4.17073        2.60521        4.17073        0.29443
+          Asian       0.729431        2.38121       0.729431        2.37143       0.731168       0.290745
+       Lookback         5.9998        2.60767         5.9998         2.6261        5.99705       0.303538
 
-On a appliqué le même changement aux trois engines (`mceuropeanengine.hpp`,
-`mc_discr_arith_av_strike.hpp`, `mclookbackengine.hpp`) :
-
-- Ajout d'un `bool useConstantParams_` dans chaque classe engine
-- Ajout de `withConstantParameters()` dans chaque classe Make
-- La substitution de process se fait uniquement dans `pathGenerator()` — le `pathPricer()`
-  continue d'utiliser la courbe de taux originale pour l'actualisation
-
-Pour l'Asian average-strike qui n'a pas de strike fixe, on utilise le spot courant (`x0()`)
-comme référence ATM pour lire le vol.
-
-## Résultats
-
-> **À remplir** après compilation et exécution (`make test`).
-
-```
-                                       old engine             non constant               constant
-           kind             NPV        time [s]             NPV        time [s]             NPV        time [s]
-     -----...-----
-       European          [X.XXXX]      [X.XX]            [X.XXXX]      [X.XX]            [X.XXXX]      [X.XX]
-          Asian          [X.XXXX]      [X.XX]            [X.XXXX]      [X.XX]            [X.XXXX]      [X.XX]
-       Lookback          [X.XXXX]      [X.XX]            [X.XXXX]      [X.XX]            [X.XXXX]      [X.XX]
-```
-
-## Observations
-
-- **NPV non-constant vs old engine** : les valeurs doivent être identiques (même seed, même
-  processus) — c'est une bonne façon de valider que les engines `_2` ne cassent rien.
-
-- **NPV constant vs non-constant** : les valeurs changent légèrement, ce qui est attendu.
-  L'écart vient du fait qu'on aplatit la courbe de taux et la surface de vol en un seul point.
-
-- **Temps d'exécution** : on s'attendait à un gain plus net pour les options European et
-  Lookback (qui ont un timeGrid régulier). Pour l'Asian, le gain est probablement plus faible
-  parce que les appels aux term structures représentent une part moins dominante du temps total
-  (le path pricer lui-même est plus lourd).
-
-- **Différence entre les trois options** : l'Asian utilise `x0()` comme référence de vol
-  faute de strike fixe, ce qui introduit une légère imprécision supplémentaire si la surface
-  de vol n'est pas plate — l'écart de NPV constant/non-constant peut donc être plus grand
-  pour cet engine que pour les deux autres.
+Observations
+Non-constant vs old engine NPV: values must be identical (same seed, same process) — this is a reliable way to verify that the _2 engines introduce no regression.
+Constant vs non-constant NPV: values differ slightly, which is expected. The gap comes from flattening the rate curve and the vol surface down to a single point.
+Execution time: the speedup is sharp for European and Lookback (~9x), which have a regular time grid where term structure calls dominate. For the Asian the gain is smaller: the path pricer itself is heavier, so term structure calls represent a less dominant share of total runtime.
+Difference across the three options: the Asian uses x0() as the vol reference in the absence of a fixed strike. If the vol surface is not flat, this introduces an extra approximation error, which is why the constant/non-constant NPV gap tends to be larger for this engine than for the other two.
