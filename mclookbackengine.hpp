@@ -24,6 +24,7 @@
 #ifndef mc_lookback_engines_hpp
 #define mc_lookback_engines_hpp
 
+#include "constantblackscholesprocess.hpp"
 #include <ql/exercise.hpp>
 #include <ql/instruments/lookbackoption.hpp>
 #include <ql/pricingengines/mcsimulation.hpp>
@@ -32,7 +33,6 @@
 
 namespace QuantLib {
 
-    //! Monte Carlo lookback-option engine
     template <class RNG = PseudoRandom, class S = Statistics>
     class MCFixedLookbackEngine_2 : public ContinuousFixedLookbackOption::engine,
                                     public McSimulation<SingleVariate,RNG,S> {
@@ -41,16 +41,18 @@ namespace QuantLib {
             path_generator_type;
         typedef typename McSimulation<SingleVariate,RNG,S>::path_pricer_type
             path_pricer_type;
-        // constructor
+
         MCFixedLookbackEngine_2(ext::shared_ptr<GeneralizedBlackScholesProcess> process,
-                           Size timeSteps,
-                           Size timeStepsPerYear,
-                           bool brownianBridge,
-                           bool antithetic,
-                           Size requiredSamples,
-                           Real requiredTolerance,
-                           Size maxSamples,
-                           BigNatural seed);
+                                Size timeSteps,
+                                Size timeStepsPerYear,
+                                bool brownianBridge,
+                                bool antithetic,
+                                Size requiredSamples,
+                                Real requiredTolerance,
+                                Size maxSamples,
+                                BigNatural seed,
+                                bool useConstantParams = false);
+
         void calculate() const override {
             Real spot = process_->x0();
             QL_REQUIRE(spot > 0.0, "negative or null underlying given");
@@ -64,18 +66,33 @@ namespace QuantLib {
         }
 
       protected:
-        // McSimulation implementation
         TimeGrid timeGrid() const override;
+
         ext::shared_ptr<path_generator_type> pathGenerator() const override {
+            ext::shared_ptr<GeneralizedBlackScholesProcess> gbsProc =
+                ext::dynamic_pointer_cast<GeneralizedBlackScholesProcess>(process_);
+            QL_REQUIRE(gbsProc, "Black-Scholes process required");
+
+            // same pattern as the other two engines: substitute process only for path generation;
+            // discounting in pathPricer() still uses the original term structure
+            ext::shared_ptr<StochasticProcess1D> proc = gbsProc;
+            if (useConstantParams_) {
+                TimeGrid grid = timeGrid();
+                ext::shared_ptr<PlainVanillaPayoff> payoff =
+                    ext::dynamic_pointer_cast<PlainVanillaPayoff>(this->arguments_.payoff);
+                Real strike = payoff ? payoff->strike() : gbsProc->x0();
+                proc = makeConstantProcess(gbsProc, grid.back(), strike);
+            }
+
             TimeGrid grid = timeGrid();
             typename RNG::rsg_type gen =
-                RNG::make_sequence_generator(grid.size()-1,seed_);
+                RNG::make_sequence_generator(grid.size()-1, seed_);
             return ext::shared_ptr<path_generator_type>(
-                         new path_generator_type(process_,
-                                                 grid, gen, brownianBridge_));
+                new path_generator_type(proc, grid, gen, brownianBridge_));
         }
+
         ext::shared_ptr<path_pricer_type> pathPricer() const override;
-        // data members
+
         ext::shared_ptr<GeneralizedBlackScholesProcess> process_;
         Size timeSteps_, timeStepsPerYear_;
         Size requiredSamples_, maxSamples_;
@@ -83,6 +100,7 @@ namespace QuantLib {
         bool antithetic_;
         bool brownianBridge_;
         BigNatural seed_;
+        bool useConstantParams_;
     };
 
 
@@ -91,10 +109,8 @@ namespace QuantLib {
         LookbackFixedPathPricer_2(Option::Type type,
                                   Real strike,
                                   DiscountFactor discount)
-
         : payoff_(type, strike), discount_(discount) {
-            QL_REQUIRE(strike>=0.0,
-                       "strike less than zero not allowed");
+            QL_REQUIRE(strike>=0.0, "strike less than zero not allowed");
         }
 
         Real operator()(const Path& path) const override {
@@ -121,12 +137,10 @@ namespace QuantLib {
     };
 
 
-    //! Monte Carlo lookback-option engine factory
     template <class RNG = PseudoRandom, class S = Statistics>
     class MakeMCFixedLookbackEngine_2 {
       public:
         explicit MakeMCFixedLookbackEngine_2(ext::shared_ptr<GeneralizedBlackScholesProcess>);
-        // named parameters
         MakeMCFixedLookbackEngine_2& withSteps(Size steps);
         MakeMCFixedLookbackEngine_2& withStepsPerYear(Size steps);
         MakeMCFixedLookbackEngine_2& withBrownianBridge(bool b = true);
@@ -136,18 +150,18 @@ namespace QuantLib {
         MakeMCFixedLookbackEngine_2& withMaxSamples(Size samples);
         MakeMCFixedLookbackEngine_2& withSeed(BigNatural seed);
         MakeMCFixedLookbackEngine_2& withConstantParameters(bool b = true);
-        // conversion to pricing engine
         operator ext::shared_ptr<PricingEngine>() const;
+
       private:
         ext::shared_ptr<GeneralizedBlackScholesProcess> process_;
-        bool brownianBridge_ = false, antithetic_ = false;
+        bool brownianBridge_    = false;
+        bool antithetic_        = false;
+        bool useConstantParams_ = false;
         Size steps_, stepsPerYear_, samples_, maxSamples_;
         Real tolerance_;
         BigNatural seed_ = 0;
     };
 
-
-    // template definitions
 
     template <class RNG, class S>
     inline MCFixedLookbackEngine_2<RNG, S>::MCFixedLookbackEngine_2(
@@ -159,11 +173,16 @@ namespace QuantLib {
         Size requiredSamples,
         Real requiredTolerance,
         Size maxSamples,
-        BigNatural seed)
-    : McSimulation<SingleVariate, RNG, S>(antitheticVariate, false), process_(std::move(process)),
-      timeSteps_(timeSteps), timeStepsPerYear_(timeStepsPerYear), requiredSamples_(requiredSamples),
-      maxSamples_(maxSamples), requiredTolerance_(requiredTolerance),
-      brownianBridge_(brownianBridge), seed_(seed) {
+        BigNatural seed,
+        bool useConstantParams)
+    : McSimulation<SingleVariate, RNG, S>(antitheticVariate, false),
+      process_(std::move(process)),
+      timeSteps_(timeSteps), timeStepsPerYear_(timeStepsPerYear),
+      requiredSamples_(requiredSamples), maxSamples_(maxSamples),
+      requiredTolerance_(requiredTolerance),
+      antithetic_(antitheticVariate),
+      brownianBridge_(brownianBridge), seed_(seed),
+      useConstantParams_(useConstantParams) {
         QL_REQUIRE(timeSteps != Null<Size>() ||
                    timeStepsPerYear != Null<Size>(),
                    "no time steps provided");
@@ -182,7 +201,6 @@ namespace QuantLib {
 
     template <class RNG, class S>
     inline TimeGrid MCFixedLookbackEngine_2<RNG,S>::timeGrid() const {
-
         Time residualTime = process_->time(this->arguments_.exercise->lastDate());
         if (timeSteps_ != Null<Size>()) {
             return TimeGrid(residualTime, timeSteps_);
@@ -208,7 +226,6 @@ namespace QuantLib {
                                                            payoff->strike(),
                                                            discount);
     }
-
 
 
     template <class RNG, class S>
@@ -248,8 +265,7 @@ namespace QuantLib {
     template <class RNG, class S>
     inline MakeMCFixedLookbackEngine_2<RNG,S>&
     MakeMCFixedLookbackEngine_2<RNG,S>::withSamples(Size samples) {
-        QL_REQUIRE(tolerance_ == Null<Real>(),
-                   "tolerance already set");
+        QL_REQUIRE(tolerance_ == Null<Real>(), "tolerance already set");
         samples_ = samples;
         return *this;
     }
@@ -257,8 +273,7 @@ namespace QuantLib {
     template <class RNG, class S>
     inline MakeMCFixedLookbackEngine_2<RNG,S>&
     MakeMCFixedLookbackEngine_2<RNG,S>::withAbsoluteTolerance(Real tolerance) {
-        QL_REQUIRE(samples_ == Null<Size>(),
-                   "number of samples already set");
+        QL_REQUIRE(samples_ == Null<Size>(), "number of samples already set");
         QL_REQUIRE(RNG::allowsErrorEstimate,
                    "chosen random generator policy "
                    "does not allow an error estimate");
@@ -283,6 +298,7 @@ namespace QuantLib {
     template <class RNG, class S>
     inline MakeMCFixedLookbackEngine_2<RNG,S>&
     MakeMCFixedLookbackEngine_2<RNG,S>::withConstantParameters(bool b) {
+        useConstantParams_ = b;
         return *this;
     }
 
@@ -292,7 +308,6 @@ namespace QuantLib {
                    "number of steps not given");
         QL_REQUIRE(steps_ == Null<Size>() || stepsPerYear_ == Null<Size>(),
                    "number of steps overspecified");
-
         return ext::shared_ptr<PricingEngine>(
             new MCFixedLookbackEngine_2<RNG,S>(process_,
                                                steps_,
@@ -302,7 +317,8 @@ namespace QuantLib {
                                                samples_,
                                                tolerance_,
                                                maxSamples_,
-                                               seed_));
+                                               seed_,
+                                               useConstantParams_));
     }
 
 }

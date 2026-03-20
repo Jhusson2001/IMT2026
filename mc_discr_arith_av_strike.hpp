@@ -24,6 +24,7 @@
 #ifndef mc_discrete_arithmetic_average_strike_asian_engine_hpp
 #define mc_discrete_arithmetic_average_strike_asian_engine_hpp
 
+#include "constantblackscholesprocess.hpp"
 #include <ql/exercise.hpp>
 #include <ql/pricingengines/asian/mc_discr_arith_av_strike.hpp>
 #include <ql/pricingengines/asian/mcdiscreteasianenginebase.hpp>
@@ -45,7 +46,7 @@ namespace QuantLib {
             path_pricer_type;
         typedef typename MCDiscreteAveragingAsianEngineBase<SingleVariate, RNG, S>::stats_type
             stats_type;
-        // constructor
+
         MCDiscreteArithmeticASEngine_2(
             const ext::shared_ptr<GeneralizedBlackScholesProcess>& process,
             bool brownianBridge,
@@ -53,14 +54,17 @@ namespace QuantLib {
             Size requiredSamples,
             Real requiredTolerance,
             Size maxSamples,
-            BigNatural seed);
+            BigNatural seed,
+            bool useConstantParams = false);
 
       protected:
-        ext::shared_ptr<path_pricer_type> pathPricer() const override;
+        ext::shared_ptr<path_pricer_type>    pathPricer()    const override;
+        ext::shared_ptr<path_generator_type> pathGenerator() const override;
+
+      private:
+        bool useConstantParams_;
     };
 
-
-    // inline definitions
 
     template <class RNG, class S>
     inline MCDiscreteArithmeticASEngine_2<RNG, S>::MCDiscreteArithmeticASEngine_2(
@@ -70,7 +74,8 @@ namespace QuantLib {
         Size requiredSamples,
         Real requiredTolerance,
         Size maxSamples,
-        BigNatural seed)
+        BigNatural seed,
+        bool useConstantParams)
     : MCDiscreteAveragingAsianEngineBase<SingleVariate, RNG, S>(process,
                                                                 brownianBridge,
                                                                 antitheticVariate,
@@ -78,7 +83,9 @@ namespace QuantLib {
                                                                 requiredSamples,
                                                                 requiredTolerance,
                                                                 maxSamples,
-                                                                seed) {}
+                                                                seed),
+      useConstantParams_(useConstantParams) {}
+
 
     template <class RNG, class S>
     inline ext::shared_ptr<typename MCDiscreteArithmeticASEngine_2<RNG, S>::path_pricer_type>
@@ -96,6 +103,7 @@ namespace QuantLib {
             ext::dynamic_pointer_cast<GeneralizedBlackScholesProcess>(this->process_);
         QL_REQUIRE(process, "Black-Scholes process required");
 
+        // discounting is always from the original term structure (not the constant approx)
         return ext::shared_ptr<typename MCDiscreteArithmeticASEngine_2<RNG, S>::path_pricer_type>(
             new ArithmeticASOPathPricer(payoff->optionType(),
                                         process->riskFreeRate()->discount(exercise->lastDate()),
@@ -104,12 +112,34 @@ namespace QuantLib {
     }
 
 
+    template <class RNG, class S>
+    inline ext::shared_ptr<typename MCDiscreteArithmeticASEngine_2<RNG, S>::path_generator_type>
+    MCDiscreteArithmeticASEngine_2<RNG, S>::pathGenerator() const {
+
+        ext::shared_ptr<GeneralizedBlackScholesProcess> process =
+            ext::dynamic_pointer_cast<GeneralizedBlackScholesProcess>(this->process_);
+        QL_REQUIRE(process, "Black-Scholes process required");
+
+        // average-strike: no fixed strike available, so we use the current spot as the
+        // ATM reference point to read sigma from the vol surface
+        ext::shared_ptr<StochasticProcess1D> proc = process;
+        if (useConstantParams_) {
+            Time T = this->timeGrid().back();
+            proc = makeConstantProcess(process, T, process->x0());
+        }
+
+        TimeGrid grid = this->timeGrid();
+        typename RNG::rsg_type gen =
+            RNG::make_sequence_generator(grid.size() - 1, this->seed_);
+        return ext::make_shared<path_generator_type>(proc, grid, gen, this->brownianBridge_);
+    }
+
+
     template <class RNG = PseudoRandom, class S = Statistics>
     class MakeMCDiscreteArithmeticASEngine_2 {
       public:
         explicit MakeMCDiscreteArithmeticASEngine_2(
             ext::shared_ptr<GeneralizedBlackScholesProcess> process);
-        // named parameters
         MakeMCDiscreteArithmeticASEngine_2& withBrownianBridge(bool b = true);
         MakeMCDiscreteArithmeticASEngine_2& withSamples(Size samples);
         MakeMCDiscreteArithmeticASEngine_2& withAbsoluteTolerance(Real tolerance);
@@ -117,15 +147,15 @@ namespace QuantLib {
         MakeMCDiscreteArithmeticASEngine_2& withSeed(BigNatural seed);
         MakeMCDiscreteArithmeticASEngine_2& withAntitheticVariate(bool b = true);
         MakeMCDiscreteArithmeticASEngine_2& withConstantParameters(bool b = true);
-        // conversion to pricing engine
         operator ext::shared_ptr<PricingEngine>() const;
 
       private:
         ext::shared_ptr<GeneralizedBlackScholesProcess> process_;
-        bool antithetic_ = false;
+        bool antithetic_        = false;
+        bool brownianBridge_    = true;
+        bool useConstantParams_ = false;
         Size samples_, maxSamples_;
         Real tolerance_;
-        bool brownianBridge_ = true;
         BigNatural seed_ = 0;
     };
 
@@ -185,17 +215,24 @@ namespace QuantLib {
     template <class RNG, class S>
     inline MakeMCDiscreteArithmeticASEngine_2<RNG, S>&
     MakeMCDiscreteArithmeticASEngine_2<RNG, S>::withConstantParameters(bool b) {
+        useConstantParams_ = b;
         return *this;
     }
 
     template <class RNG, class S>
     inline MakeMCDiscreteArithmeticASEngine_2<RNG, S>::operator ext::shared_ptr<PricingEngine>()
         const {
-        return ext::shared_ptr<PricingEngine>(new MCDiscreteArithmeticASEngine_2<RNG, S>(
-            process_, brownianBridge_, antithetic_, samples_, tolerance_, maxSamples_, seed_));
+        return ext::shared_ptr<PricingEngine>(
+            new MCDiscreteArithmeticASEngine_2<RNG, S>(process_,
+                                                       brownianBridge_,
+                                                       antithetic_,
+                                                       samples_,
+                                                       tolerance_,
+                                                       maxSamples_,
+                                                       seed_,
+                                                       useConstantParams_));
     }
 
 }
-
 
 #endif
